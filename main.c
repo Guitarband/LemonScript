@@ -1,4 +1,5 @@
 #include "mpc.h"
+#include "math.h"
 
 #ifdef _WIN32
 
@@ -22,7 +23,7 @@ void add_history(char* unused) {}
 
 enum { LERR_DIV_ZERO, LERR_MOD_ZERO, LERR_BAD_OP, LERR_BAD_NUM };
 enum { LVAL_NUM, LVAL_OP, LVAL_ERR, LVAL_VAR };
-enum {PLUS,MINUS,MULTIPLY,DIVIDE,MODULUS};
+enum { PLUS, MINUS, MULTIPLY, DIVIDE, MODULUS, EXPONENTIAL, FLOORDIV};
 
 typedef struct Variable {
   char* name;
@@ -44,7 +45,7 @@ lval lval_num(long x) {
   v.num = x;
   return v;
 }
-lval lval_op(long x) {
+lval lval_op(int x) {
   lval v;
   v.type = LVAL_OP;
   v.op = x;
@@ -84,7 +85,7 @@ void lval_print(lval v) {
     break;
   }
 }
-void lval_println(lval v) { lval_print(v); putchar('\n'); }
+void lval_println(lval v) { printf("> "); lval_print(v); putchar('\n'); }
 
 /// Searches for the specified Variable in the stored Variable table
 Variable* lookup(Variable* table, char* name) {
@@ -121,10 +122,12 @@ lval eval_op(lval x, lval op, lval y) {
     case MULTIPLY: return lval_num(x.num * y.num);
     case DIVIDE: return y.num == 0 ? lval_err(LERR_DIV_ZERO) : lval_num(x.num / y.num);
     case MODULUS: return y.num == 0 ? lval_err(LERR_MOD_ZERO) : lval_num(x.num % y.num);
+    case EXPONENTIAL: return y.num == 0 ? lval_err(LERR_MOD_ZERO) : lval_num(pow(x.num, y.num));
     default: return lval_err(LERR_BAD_OP);
   }
 }
 lval eval(mpc_ast_t* t) {
+  //printf("%s",t->tag);
 
   if (strstr(t->tag, "identifier")) {
     Variable* var = lookup(var_table, t->contents);
@@ -141,12 +144,16 @@ lval eval(mpc_ast_t* t) {
     if (strcmp(t->contents, "*") == 0) return lval_op(2);
     if (strcmp(t->contents, "/") == 0) return lval_op(3);
     if (strcmp(t->contents, "%") == 0) return lval_op(4);
+    if (strcmp(t->contents, "^") == 0) return lval_op(5);
   }
 
   if (strstr(t->tag, "number")) {
     errno = 0;
     long x = strtol(t->contents, NULL, 10);
-    return errno != ERANGE ? lval_num(x) : lval_err(LERR_BAD_NUM);
+    if(errno != ERANGE) {
+      return lval_num(x);
+    }
+    return lval_err(LERR_BAD_NUM);
   }
 
   if (strstr(t->children[1]->tag, "assign")) {
@@ -158,19 +165,116 @@ lval eval(mpc_ast_t* t) {
     return lval_err(LERR_BAD_NUM);
   }
 
-
-  if (strstr(t->children[1]->tag, "lemons")) {
-    if(t->children[1]->children_num > 0) {
-      lval x = eval(t->children[1]->children[0]);
-      lval op = eval(t->children[1]->children[1]);
-      lval y = eval(t->children[1]->children[2]);
-
-      printf("%i",x.type);
-
+  if (strstr(t->tag, "bracexpr")) {
+    int i;
+    lval total;
+    if(strstr(t->children[0]->tag, "equation")) {
+      total = eval(t->children[0]->children[0]);
+      i = 0;
+      while(strstr(t->children[i+1]->tag,"equation")) {
+        lval op = eval(t->children[i]->children[1]);
+        lval next_x = eval(t->children[i+1]->children[0]);
+        if(eval(t->children[i+1]->children[1]).op > MINUS) {
+          while(strstr(t->children[i+2]->tag,"equation") && eval(t->children[i+1]->children[1]).op > MINUS) {
+            lval next_op = eval(t->children[i+1]->children[1]);
+            lval next_y = eval(t->children[i+2]->children[0]);
+            if (next_op.type != LVAL_OP) {
+              return lval_err(LERR_BAD_OP);
+            }
+            next_x = eval_op(next_x,next_op,next_y);
+            i++;
+          }
+          if(eval(t->children[i+1]->children[1]).op > MINUS) {
+            lval next_op = eval(t->children[i+1]->children[1]);
+            lval next_y= eval(t->children[i+3]);
+            if (op.type != LVAL_OP) {
+              return lval_err(LERR_BAD_OP);
+            }
+            next_x = eval_op(next_x,next_op,next_y);
+          }
+        }
+        if (op.type != LVAL_OP) {
+          return lval_err(LERR_BAD_OP);
+        }
+        total = eval_op(total,op,next_x);
+        i++;
+      }
+      lval op = eval(t->children[i]->children[1]);
+      lval y= eval(t->children[i+2]);
+      total = eval_op(total, op, y);
+      i = i + 2;
+      if(i < t->children_num) {
+        op = eval(t->children[i+2]);
+        y= eval(t->children[i+3]);
+        total = eval_op(total, op, y);
+      }
       if (op.type == LVAL_OP) {
-        return eval_op(x, op, y);
+        return total;
       }
     }
+    total = eval(t->children[1]);
+    i=2;
+    if(strstr(t->children[i]->tag, "char")) {
+      if(strstr(t->children[i]->tag, "operator")) {i=2;}
+      else{ i=3; }
+    }
+    if(t->children_num == 3) {
+      return total;
+    }
+    while(i< t->children_num -1) {
+      lval op = eval(t->children[i]);
+      if(strstr(t->children[i+1]->tag,"char")) {i++;}
+      lval y = eval(t->children[i+1]);
+      total = eval_op(total, op, y);
+      i++;
+      i++;
+      //printf("%ld", total.num);
+    }
+    return total;
+  }
+
+  if (strstr(t->tag, "expr")) {
+    lval total = eval(t->children[0]->children[0]);
+    int i = 0;
+    while(strstr(t->children[i+1]->tag,"equation")) {
+      lval op = eval(t->children[i]->children[1]);
+      lval next_x = eval(t->children[i+1]->children[0]);
+      if(eval(t->children[i+1]->children[1]).op > MINUS) {
+        while(strstr(t->children[i+2]->tag,"equation") && eval(t->children[i+1]->children[1]).op > MINUS) {
+          lval next_op = eval(t->children[i+1]->children[1]);
+          lval next_y = eval(t->children[i+2]->children[0]);
+          if (next_op.type != LVAL_OP) {
+            return lval_err(LERR_BAD_OP);
+          }
+          next_x = eval_op(next_x,next_op,next_y);
+          i++;
+        }
+        if(eval(t->children[i+1]->children[1]).op > MINUS) {
+          lval next_op = eval(t->children[i+1]->children[1]);
+          lval next_y= eval(t->children[i+2]);
+          if (op.type != LVAL_OP) {
+            return lval_err(LERR_BAD_OP);
+          }
+          next_x = eval_op(next_x,next_op,next_y);
+        }
+      }
+      if (op.type != LVAL_OP) {
+        return lval_err(LERR_BAD_OP);
+      }
+      total = eval_op(total,op,next_x);
+      i++;
+    }
+
+    lval op = eval(t->children[i]->children[1]);
+    lval y= eval(t->children[i+1]);
+    if (op.type == LVAL_OP) {
+      return eval_op(total, op, y);
+    }
+
+    return lval_err(LERR_BAD_NUM);
+  }
+
+  if (strstr(t->children[1]->tag, "lemons")) {
     return eval(t->children[1]);
   }
 
@@ -183,24 +287,41 @@ int main(int argc, char** argv) {
   mpc_parser_t* Operator = mpc_new("operator");
   mpc_parser_t* Identifier = mpc_new("identifier");
   mpc_parser_t* Assign = mpc_new("assign");
+  mpc_parser_t* Equation = mpc_new("equation");
   mpc_parser_t* Expr = mpc_new("expr");
+  mpc_parser_t* BracExpr = mpc_new("bracexpr");
+  mpc_parser_t* QExpr = mpc_new("qexpr");
   mpc_parser_t* LemonS = mpc_new("lemons");
   mpc_parser_t* Language = mpc_new("language");
 
   mpca_lang(MPCA_LANG_DEFAULT,
-    "                                           \
-      number     : /-?[0-9]+/ ;                          \
-      operator   : '+' | '-' | '*' | '/' | '%' ;          \
-      identifier : /[a-zA-Z_][a-zA-Z0-9_]*/ ;              \
-      assign     : <identifier> '=' <expr> ;                \
-      expr       : <number>                                  \
-                  | '(' <expr> <operator> <expr> ')'          \
-                  | <assign>                                   \
-                  | <identifier> ;                              \
-      lemons      : <expr> <operator> <expr> | <expr>  ;          \
-      language   : /^/ <lemons> /$/ ;                              \
+    "                                               \
+      number     : /-?[0-9]+/ ;                              \
+      operator   : '+'      \
+                  | '-'     \
+                  | '*'     \
+                  | '/'     \
+                  | '%'\
+                  | '^'  ;  \
+      identifier : /[a-zA-Z_][a-zA-Z0-9_]*/ ;                  \
+      assign     : <identifier> '=' <expr> ;                    \
+      equation   : <number> <operator>                           \
+                  | <identifier> <operator>;                      \
+      expr       :  <equation>* <number>                           \
+                  | <equation>* <identifier>;                       \
+      bracexpr   :  <equation>* '('<expr>+')' <operator> <expr>+      \
+                  | <equation>* '('<expr>+')' \
+                  | <equation>* '('<bracexpr>')' <operator> <expr>+ \
+                  | <equation>* '('<bracexpr>')'\
+                  | '(' <expr>+ <operator> <bracexpr> ')' \
+                  | '(' <bracexpr> <operator> <expr>+ ')'        \
+                  | '(' <bracexpr> <operator> <bracexpr> ')' ;        \
+      qexpr      : '[' <expr>+ ']'  \
+                  | '[' <bracexpr> ']' ; \
+      lemons     : <assign> | <expr> | <bracexpr> | <qexpr> ;                    \
+      language   : /^/ <lemons> /$/ ;                                   \
     ",
-    Number, Operator, Identifier, Assign, Expr, LemonS, Language);
+    Number, Operator, Identifier, Assign, Equation, Expr, BracExpr, QExpr, LemonS, Language);
 
   puts("LemonScript Version 0.0.0.0.4");
   puts("Press Ctrl+c to Exit\n");
@@ -213,8 +334,8 @@ int main(int argc, char** argv) {
     if (mpc_parse("<stdin>", input, Language, &r)) {
       mpc_ast_t* root = r.output;
 
-      //mpc_ast_print(root);
-      lval_println(eval(root));
+      mpc_ast_print(root);
+      //lval_println(eval(root));
 
       mpc_ast_delete(root);
     } else {
@@ -225,7 +346,7 @@ int main(int argc, char** argv) {
     free(input);
   }
 
-  mpc_cleanup(7, Number, Operator, Identifier, Assign, Expr, LemonS, Language);
+  mpc_cleanup(8, Number, Operator, Identifier, Assign, Equation, Expr, BracExpr, QExpr, LemonS, Language);
 
   Variable* var = var_table;
   while(var) {
