@@ -21,14 +21,14 @@ void add_history(char* unused) {}
 #include <editline/history.h>
 #endif
 
-enum { LERR_DIV_ZERO, LERR_MOD_ZERO, LERR_BAD_OP, LERR_BAD_NUM };
+enum { LERR_DIV_ZERO, LERR_MOD_ZERO, LERR_BAD_OP, LERR_BAD_NUM, LERR_BAD_VAR};
 enum { LVAL_NUM, LVAL_OP, LVAL_ERR, LVAL_VAR };
 enum { PLUS, MINUS, MULTIPLY, DIVIDE, MODULUS, EXPONENTIAL, FLOORDIV};
 
 typedef struct Variable {
   char* name;
-  long value;
   struct Variable* next;
+  mpc_ast_t* val;
 } Variable;
 Variable* var_table = NULL;
 
@@ -69,6 +69,8 @@ void lval_print(lval v) {
   switch (v.type) {
     case LVAL_NUM: printf("%li", v.num); break;
 
+    case LVAL_VAR: printf("%s", v.identifier);
+
     case LVAL_ERR:
       if (v.err == LERR_DIV_ZERO) {
         printf("Error: Division By Zero!");
@@ -81,6 +83,9 @@ void lval_print(lval v) {
       }
       if (v.err == LERR_BAD_NUM)  {
         printf("Error: Invalid Number!");
+      }
+      if (v.err == LERR_BAD_VAR)  {
+        printf("Error: Undefined Variable!");
       }
     break;
   }
@@ -97,15 +102,35 @@ Variable* lookup(Variable* table, char* name) {
   return NULL;
 }
 
+/// Creates a copy of the parsed expression
+mpc_ast_t* mpc_ast_copy(mpc_ast_t* ast) {
+  if (ast == NULL) return NULL;
+
+  mpc_ast_t* new_ast = malloc(sizeof(mpc_ast_t));
+  if (!new_ast) return NULL;
+
+  new_ast->tag = strdup(ast->tag);
+  new_ast->contents = strdup(ast->contents);
+  new_ast->children_num = ast->children_num;
+  new_ast->children = malloc(sizeof(mpc_ast_t*) * new_ast->children_num);
+
+  for (size_t i = 0; i < new_ast->children_num; i++) {
+    new_ast->children[i] = mpc_ast_copy(ast->children[i]);
+  }
+
+  return new_ast;
+}
+
 /// Sets information for existing variable else creates a new variable
-void var_table_set(char* name, long value) {
+void var_table_set(char* name, mpc_ast_t* value) {
   Variable* var = lookup(var_table, name);
   if(var) {
-    var->value = value;
+    mpc_ast_delete(var->val);
+    var->val = mpc_ast_copy(value);
   } else {
     Variable* new_var = malloc(sizeof(Variable));
     new_var->name = strdup(name);
-    new_var->value = value;
+    new_var->val = mpc_ast_copy(value);
     new_var->next = var_table;
     var_table = new_var;
   }
@@ -132,9 +157,9 @@ lval eval(mpc_ast_t* t) {
   if (strstr(t->tag, "identifier")) {
     Variable* var = lookup(var_table, t->contents);
     if (var) {
-      return lval_num(var->value);
+      return eval(var->val);
     } else {
-      return lval_err(LERR_BAD_OP);
+      return lval_err(LERR_BAD_VAR);
     }
   }
 
@@ -157,12 +182,9 @@ lval eval(mpc_ast_t* t) {
   }
 
   if (strstr(t->children[1]->tag, "assign")) {
-    lval x = eval(t->children[1]->children[2]);
-    if (x.type == LVAL_NUM) {
-      var_table_set(t->children[1]->children[0]->contents, x.num);
-      return x;
-    }
-    return lval_err(LERR_BAD_NUM);
+    mpc_ast_t* expr = t->children[1]->children[2];
+    var_table_set(t->children[1]->children[0]->contents, expr);
+    return lval_var(t->children[1]->children[0]->contents);
   }
 
   if (strstr(t->tag, "bracexpr")) {
@@ -290,38 +312,44 @@ int main(int argc, char** argv) {
   mpc_parser_t* Equation = mpc_new("equation");
   mpc_parser_t* Expr = mpc_new("expr");
   mpc_parser_t* BracExpr = mpc_new("bracexpr");
+  mpc_parser_t* Seperator = mpc_new("seperator");
   mpc_parser_t* QExpr = mpc_new("qexpr");
   mpc_parser_t* LemonS = mpc_new("lemons");
   mpc_parser_t* Language = mpc_new("language");
 
   mpca_lang(MPCA_LANG_DEFAULT,
-    "                                               \
-      number     : /-?[0-9]+/ ;                              \
-      operator   : '+'      \
-                  | '-'     \
-                  | '*'     \
-                  | '/'     \
-                  | '%'\
-                  | '^'  ;  \
-      identifier : /[a-zA-Z_][a-zA-Z0-9_]*/ ;                  \
-      assign     : <identifier> '=' <expr> ;                    \
-      equation   : <number> <operator>                           \
-                  | <identifier> <operator>;                      \
-      expr       :  <equation>* <number>                           \
-                  | <equation>* <identifier>;                       \
-      bracexpr   :  <equation>* '('<expr>+')' <operator> <expr>+      \
-                  | <equation>* '('<expr>+')' \
+    "                                     \
+      number     : /-?[0-9]+/ ;                    \
+      operator   : '+'                              \
+                  | '-'                              \
+                  | '*'                               \
+                  | '/'                                \
+                  | '%'                                 \
+                  | '^'  ;                               \
+      identifier : /[a-zA-Z_][a-zA-Z0-9_]*/ ;             \
+      assign     :  <identifier> '=' <bracexpr>            \
+                  | <identifier> '=' <expr>                 \
+                  | <identifier> '=' <qexpr>;                \
+      equation   :  <number> <operator>                       \
+                  | <identifier> <operator>;                   \
+      expr       :  <equation>* <number>                        \
+                  | <equation>* <identifier>;                    \
+      bracexpr   :  <equation>* '('<expr>+')' <operator> <expr>+  \
+                  | <equation>* '('<expr>+')'                      \
                   | <equation>* '('<bracexpr>')' <operator> <expr>+ \
-                  | <equation>* '('<bracexpr>')'\
-                  | '(' <expr>+ <operator> <bracexpr> ')' \
-                  | '(' <bracexpr> <operator> <expr>+ ')'        \
-                  | '(' <bracexpr> <operator> <bracexpr> ')' ;        \
-      qexpr      : '[' <expr>+ ']'  \
-                  | '[' <bracexpr> ']' ; \
-      lemons     : <assign> | <expr> | <bracexpr> | <qexpr> ;                    \
-      language   : /^/ <lemons> /$/ ;                                   \
+                  | <equation>* '('<bracexpr>')'                     \
+                  | '(' <expr>+ <operator> <bracexpr> ')'             \
+                  | '(' <bracexpr> <operator> <expr>+ ')'              \
+                  | '(' <bracexpr> <operator> <bracexpr> ')'            \
+                  | <bracexpr> <operator> <bracexpr> ;                   \
+      seperator  :  <expr> ','                                            \
+                  | <bracexpr> ',' ;                                       \
+      qexpr      :  '[' <seperator>* <expr> ']'                             \
+                  | '[' <seperator>* <bracexpr> ']' ;                        \
+      lemons     :  <assign> | <expr> | <bracexpr> | <qexpr> ;                \
+      language   : /^/ <lemons> /$/ ;                                          \
     ",
-    Number, Operator, Identifier, Assign, Equation, Expr, BracExpr, QExpr, LemonS, Language);
+    Number, Operator, Identifier, Assign, Equation, Expr, BracExpr, Seperator, QExpr, LemonS, Language);
 
   puts("LemonScript Version 0.0.0.0.4");
   puts("Press Ctrl+c to Exit\n");
@@ -334,8 +362,8 @@ int main(int argc, char** argv) {
     if (mpc_parse("<stdin>", input, Language, &r)) {
       mpc_ast_t* root = r.output;
 
-      mpc_ast_print(root);
-      //lval_println(eval(root));
+      //mpc_ast_print(root);
+      lval_println(eval(root));
 
       mpc_ast_delete(root);
     } else {
@@ -346,7 +374,7 @@ int main(int argc, char** argv) {
     free(input);
   }
 
-  mpc_cleanup(8, Number, Operator, Identifier, Assign, Equation, Expr, BracExpr, QExpr, LemonS, Language);
+  mpc_cleanup(11, Number, Operator, Identifier, Assign, Equation, Expr, BracExpr, Seperator, QExpr, LemonS, Language);
 
   Variable* var = var_table;
   while(var) {
